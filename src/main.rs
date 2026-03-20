@@ -253,11 +253,17 @@ async fn main() {
         .with_state(state)
         .layer(cors);
 
-    let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
-    println!("Server running at http://{}", addr);
+let port: u16 = std::env::var("PORT")
+    .ok()
+    .and_then(|p| p.parse().ok())
+    .unwrap_or(3000);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+println!("Server running at http://{}", addr);
+
+let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+axum::serve(listener, app).await.unwrap();
+    println!("Server running at http://{}", addr);
 }
 
 async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
