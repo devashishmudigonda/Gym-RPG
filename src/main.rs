@@ -1,6 +1,12 @@
+mod auth;
+mod auth_middleware;
+
+use auth::{create_jwt, hash_password, verify_password};
+use auth_middleware::require_auth;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::Method,
+    middleware,
     routing::{get, post},
     Json, Router,
 };
@@ -23,6 +29,14 @@ struct ApiResponse<T> {
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
+struct User {
+    id: i64,
+    email: String,
+    password_hash: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 struct Profile {
     id: i64,
     name: String,
@@ -33,10 +47,24 @@ struct Profile {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CreateProfile {
+struct RegisterRequest {
+    email: String,
+    password: String,
     name: String,
     age: i64,
     body_weight: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthResponse {
+    token: String,
+    profile: Profile,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -51,6 +79,12 @@ struct Exercise {
 #[derive(Debug, Serialize, Deserialize)]
 struct CreateExercise {
     profile_id: i64,
+    name: String,
+    muscle_group: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateExercise {
     name: String,
     muscle_group: String,
 }
@@ -74,6 +108,21 @@ struct CreateWorkoutLog {
     session_id: i64,
     weight: f64,
     reps: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateWorkoutLog {
+    weight: f64,
+    reps: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkoutLogResponse {
+    workout: WorkoutLog,
+    gained_xp: i64,
+    total_xp: i64,
+    new_pr: bool,
+    unlocked_badges: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,32 +179,11 @@ struct DashboardSummary {
     badges: Vec<Badge>,
 }
 
-#[derive(Debug, Serialize)]
-struct WorkoutLogResponse {
-    workout: WorkoutLog,
-    gained_xp: i64,
-    total_xp: i64,
-    new_pr: bool,
-    unlocked_badges: Vec<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 struct ExerciseCatalogItem {
     id: i64,
     name: String,
     muscle_group: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct UpdateExercise {
-    name: String,
-    muscle_group: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct UpdateWorkoutLog {
-    weight: f64,
-    reps: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,55 +255,75 @@ async fn main() {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(Any);
 
-    let app = Router::new()
-        .route("/", get(health_check))
-        .route("/profiles", post(create_profile))
-        .route("/profiles/{id}", get(get_profile))
-        .route("/profiles/{id}/level", get(get_profile_level))
-        .route("/profiles/{id}/dashboard", get(get_dashboard))
-        .route("/profiles/{id}/badges", get(get_badges))
-        .route("/profiles/{id}/exercises", get(get_profile_exercises))
-        .route("/profiles/{id}/coverage/today", get(get_today_coverage))
-        .route("/profiles/{id}/coverage/week", get(get_week_coverage))
-        .route("/profiles/{id}/missions", get(get_missions))
-        .route("/catalog/exercises", get(search_catalog_exercises))
+    let protected = Router::new()
+        .route("/me/profile", get(get_me_profile))
+        .route("/me/dashboard", get(get_me_dashboard))
+        .route("/me/exercises", get(get_me_exercises))
+        .route("/me/coverage/today", get(get_me_today_coverage))
+        .route("/me/coverage/week", get(get_me_week_coverage))
+        .route("/me/missions", get(get_me_missions))
+        .route("/me/workouts/active", get(get_my_active_workout))
+        .route("/me/exercises/{id}/history", get(get_my_exercise_history))
+        .route("/me/exercises/{id}/graph", get(get_my_exercise_graph))
         .route("/exercises", post(create_exercise))
         .route("/exercises/{id}", post(update_exercise))
         .route("/exercises/{id}/delete", post(delete_exercise))
-        .route("/exercises/{id}/history", get(get_exercise_history))
-        .route("/exercises/{id}/graph", get(get_exercise_graph))
         .route("/workouts/start", post(start_workout_session))
-        .route("/workouts/active/{profile_id}", get(get_active_workout_session))
         .route("/workouts/end/{session_id}", post(end_workout_session))
         .route("/workouts/log", post(create_workout_log))
         .route("/workouts/{id}", post(update_workout_log))
         .route("/workouts/{id}/delete", post(delete_workout_log))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
+
+    let app = Router::new()
+        .route("/", get(health_check))
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
+        .route("/catalog/exercises", get(search_catalog_exercises))
+        .merge(protected)
         .with_state(state)
         .layer(cors);
 
-let port: u16 = std::env::var("PORT")
-    .ok()
-    .and_then(|p| p.parse().ok())
-    .unwrap_or(3000);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
 
-let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-println!("Server running at http://{}", addr);
-
-let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-axum::serve(listener, app).await.unwrap();
+    let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     println!("Server running at http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
             name TEXT NOT NULL,
             age INTEGER NOT NULL,
             body_weight REAL NOT NULL,
             xp INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
         "#,
     )
@@ -415,18 +463,53 @@ async fn health_check() -> Json<ApiResponse<String>> {
     })
 }
 
-async fn create_profile(
+async fn register(
     State(state): State<AppState>,
-    Json(payload): Json<CreateProfile>,
-) -> Json<ApiResponse<Profile>> {
+    Json(payload): Json<RegisterRequest>,
+) -> Json<ApiResponse<AuthResponse>> {
     let now = Utc::now().to_rfc3339();
 
-    let result = sqlx::query(
+    let password_hash = match hash_password(&payload.password) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Password hash failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    let user_insert = sqlx::query(
         r#"
-        INSERT INTO profiles (name, age, body_weight, xp, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO users (email, password_hash, created_at)
+        VALUES (?, ?, ?)
         "#,
     )
+    .bind(&payload.email)
+    .bind(&password_hash)
+    .bind(&now)
+    .execute(&state.db)
+    .await;
+
+    let user_id = match user_insert {
+        Ok(res) => res.last_insert_rowid(),
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Failed to create user: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    let profile_insert = sqlx::query(
+        r#"
+        INSERT INTO profiles (user_id, name, age, body_weight, xp, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(user_id)
     .bind(&payload.name)
     .bind(payload.age)
     .bind(payload.body_weight)
@@ -435,51 +518,168 @@ async fn create_profile(
     .execute(&state.db)
     .await;
 
-    match result {
-        Ok(res) => {
-            let id = res.last_insert_rowid();
-            let profile = sqlx::query_as::<_, Profile>(
-                r#"
-                SELECT id, name, age, body_weight, xp, created_at
-                FROM profiles
-                WHERE id = ?
-                "#,
-            )
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-
-            Json(ApiResponse {
-                success: true,
-                message: "Profile created".to_string(),
-                data: Some(profile),
-            })
-        }
-        Err(e) => Json(ApiResponse {
+    if let Err(e) = profile_insert {
+        return Json(ApiResponse {
             success: false,
             message: format!("Failed to create profile: {}", e),
             data: None,
-        }),
+        });
     }
-}
 
-async fn get_profile(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Json<ApiResponse<Profile>> {
-    let result = sqlx::query_as::<_, Profile>(
+    let profile = sqlx::query_as::<_, Profile>(
         r#"
         SELECT id, name, age, body_weight, xp, created_at
         FROM profiles
-        WHERE id = ?
+        WHERE user_id = ?
         "#,
     )
-    .bind(id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+
+    let token = match create_jwt(user_id) {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Token creation failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    Json(ApiResponse {
+        success: true,
+        message: "Registered successfully".to_string(),
+        data: Some(AuthResponse { token, profile }),
+    })
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> Json<ApiResponse<AuthResponse>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, email, password_hash, created_at
+        FROM users
+        WHERE email = ?
+        "#,
+    )
+    .bind(&payload.email)
     .fetch_one(&state.db)
     .await;
 
-    match result {
+    let user = match user {
+        Ok(u) => u,
+        Err(_) => {
+            return Json(ApiResponse {
+                success: false,
+                message: "Invalid credentials".to_string(),
+                data: None,
+            })
+        }
+    };
+
+    let valid = verify_password(&payload.password, &user.password_hash).unwrap_or(false);
+    if !valid {
+        return Json(ApiResponse {
+            success: false,
+            message: "Invalid credentials".to_string(),
+            data: None,
+        });
+    }
+
+    let profile = sqlx::query_as::<_, Profile>(
+        r#"
+        SELECT id, name, age, body_weight, xp, created_at
+        FROM profiles
+        WHERE user_id = ?
+        "#,
+    )
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+
+    let token = match create_jwt(user.id) {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Token creation failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    Json(ApiResponse {
+        success: true,
+        message: "Login successful".to_string(),
+        data: Some(AuthResponse { token, profile }),
+    })
+}
+
+async fn get_current_profile_by_user_id(
+    db: &SqlitePool,
+    user_id: i64,
+) -> Result<Profile, sqlx::Error> {
+    sqlx::query_as::<_, Profile>(
+        r#"
+        SELECT id, name, age, body_weight, xp, created_at
+        FROM profiles
+        WHERE user_id = ?
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+}
+
+async fn get_owned_exercise(
+    db: &SqlitePool,
+    user_id: i64,
+    exercise_id: i64,
+) -> Result<Exercise, sqlx::Error> {
+    sqlx::query_as::<_, Exercise>(
+        r#"
+        SELECT e.id, e.profile_id, e.name, e.muscle_group, e.created_at
+        FROM exercises e
+        JOIN profiles p ON e.profile_id = p.id
+        WHERE e.id = ? AND p.user_id = ?
+        "#,
+    )
+    .bind(exercise_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+}
+
+async fn get_owned_workout_session(
+    db: &SqlitePool,
+    user_id: i64,
+    session_id: i64,
+) -> Result<WorkoutSession, sqlx::Error> {
+    sqlx::query_as::<_, WorkoutSession>(
+        r#"
+        SELECT ws.id, ws.profile_id, ws.started_at, ws.ended_at, ws.status
+        FROM workout_sessions ws
+        JOIN profiles p ON ws.profile_id = p.id
+        WHERE ws.id = ? AND p.user_id = ?
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+}
+
+async fn get_me_profile(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<Profile>> {
+    match get_current_profile_by_user_id(&state.db, user_id).await {
         Ok(profile) => Json(ApiResponse {
             success: true,
             message: "Profile fetched".to_string(),
@@ -487,17 +687,96 @@ async fn get_profile(
         }),
         Err(e) => Json(ApiResponse {
             success: false,
-            message: format!("Profile not found: {}", e),
+            message: format!("Profile fetch failed: {}", e),
             data: None,
         }),
     }
 }
 
+async fn get_me_dashboard(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<DashboardSummary>> {
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    get_dashboard(State(state), Path(profile.id)).await
+}
+
+async fn get_me_exercises(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<Vec<Exercise>>> {
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    get_profile_exercises(State(state), Path(profile.id)).await
+}
+
+async fn get_me_today_coverage(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<MuscleCoverageResponse>> {
+    let profile = get_current_profile_by_user_id(&state.db, user_id).await.unwrap();
+    get_today_coverage(State(state), Path(profile.id)).await
+}
+
+async fn get_me_week_coverage(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<MuscleCoverageResponse>> {
+    let profile = get_current_profile_by_user_id(&state.db, user_id).await.unwrap();
+    get_week_coverage(State(state), Path(profile.id)).await
+}
+
+async fn get_me_missions(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<MissionSummary>> {
+    let profile = get_current_profile_by_user_id(&state.db, user_id).await.unwrap();
+    get_missions(State(state), Path(profile.id)).await
+}
+
+async fn get_my_active_workout(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<ActiveWorkoutResponse>> {
+    let profile = get_current_profile_by_user_id(&state.db, user_id).await.unwrap();
+    get_active_workout_session(State(state), Path(profile.id)).await
+}
+
 async fn create_exercise(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
     Json(payload): Json<CreateExercise>,
 ) -> Json<ApiResponse<Exercise>> {
     let now = Utc::now().to_rfc3339();
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
 
     let result = sqlx::query(
         r#"
@@ -505,7 +784,7 @@ async fn create_exercise(
         VALUES (?, ?, ?, ?)
         "#,
     )
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .bind(&payload.name)
     .bind(&payload.muscle_group)
     .bind(&now)
@@ -515,7 +794,6 @@ async fn create_exercise(
     match result {
         Ok(res) => {
             let id = res.last_insert_rowid();
-
             let exercise = sqlx::query_as::<_, Exercise>(
                 r#"
                 SELECT id, profile_id, name, muscle_group, created_at
@@ -542,11 +820,357 @@ async fn create_exercise(
     }
 }
 
+async fn update_exercise(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(exercise_id): Path<i64>,
+    Json(payload): Json<UpdateExercise>,
+) -> Json<ApiResponse<Exercise>> {
+    if get_owned_exercise(&state.db, user_id, exercise_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise not found".to_string(),
+            data: None,
+        });
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE exercises
+        SET name = ?, muscle_group = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&payload.name)
+    .bind(&payload.muscle_group)
+    .bind(exercise_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(_) => {
+            let exercise = sqlx::query_as::<_, Exercise>(
+                r#"
+                SELECT id, profile_id, name, muscle_group, created_at
+                FROM exercises
+                WHERE id = ?
+                "#,
+            )
+            .bind(exercise_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+
+            Json(ApiResponse {
+                success: true,
+                message: "Exercise updated".to_string(),
+                data: Some(exercise),
+            })
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to update exercise: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn delete_exercise(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(exercise_id): Path<i64>,
+) -> Json<ApiResponse<String>> {
+    if get_owned_exercise(&state.db, user_id, exercise_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise not found".to_string(),
+            data: None,
+        });
+    }
+
+    let _ = sqlx::query(
+        r#"
+        DELETE FROM workout_logs
+        WHERE exercise_id = ?
+        "#,
+    )
+    .bind(exercise_id)
+    .execute(&state.db)
+    .await;
+
+    let result = sqlx::query(
+        r#"
+        DELETE FROM exercises
+        WHERE id = ?
+        "#,
+    )
+    .bind(exercise_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(_) => Json(ApiResponse {
+            success: true,
+            message: "Exercise deleted".to_string(),
+            data: Some("Deleted".to_string()),
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to delete exercise: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn start_workout_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Json(_payload): Json<StartWorkoutSessionRequest>,
+) -> Json<ApiResponse<WorkoutSession>> {
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    let existing = sqlx::query_as::<_, WorkoutSession>(
+        r#"
+        SELECT id, profile_id, started_at, ended_at, status
+        FROM workout_sessions
+        WHERE profile_id = ? AND status = 'active'
+        ORDER BY started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(profile.id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match existing {
+        Ok(Some(session)) => {
+            return Json(ApiResponse {
+                success: true,
+                message: "Active workout session already exists".to_string(),
+                data: Some(session),
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Failed to check active session: {}", e),
+                data: None,
+            });
+        }
+    }
+
+    let now = Utc::now().to_rfc3339();
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO workout_sessions (profile_id, started_at, ended_at, status)
+        VALUES (?, ?, NULL, 'active')
+        "#,
+    )
+    .bind(profile.id)
+    .bind(&now)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(res) => {
+            let id = res.last_insert_rowid();
+            let session = sqlx::query_as::<_, WorkoutSession>(
+                r#"
+                SELECT id, profile_id, started_at, ended_at, status
+                FROM workout_sessions
+                WHERE id = ?
+                "#,
+            )
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+
+            Json(ApiResponse {
+                success: true,
+                message: "Workout session started".to_string(),
+                data: Some(session),
+            })
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to start workout session: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn get_active_workout_session(
+    State(state): State<AppState>,
+    Path(profile_id): Path<i64>,
+) -> Json<ApiResponse<ActiveWorkoutResponse>> {
+    let session_result = sqlx::query_as::<_, WorkoutSession>(
+        r#"
+        SELECT id, profile_id, started_at, ended_at, status
+        FROM workout_sessions
+        WHERE profile_id = ? AND status = 'active'
+        ORDER BY started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(profile_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match session_result {
+        Ok(Some(session)) => {
+            let entries = sqlx::query_as::<_, WorkoutLogWithExercise>(
+                r#"
+                SELECT
+                    w.id,
+                    w.profile_id,
+                    w.exercise_id,
+                    w.session_id,
+                    e.name as exercise_name,
+                    e.muscle_group as muscle_group,
+                    w.weight,
+                    w.reps,
+                    w.total_volume,
+                    w.performed_at
+                FROM workout_logs w
+                JOIN exercises e ON w.exercise_id = e.id
+                WHERE w.session_id = ?
+                ORDER BY w.performed_at ASC
+                "#,
+            )
+            .bind(session.id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+            Json(ApiResponse {
+                success: true,
+                message: "Active workout fetched".to_string(),
+                data: Some(ActiveWorkoutResponse { session, entries }),
+            })
+        }
+        Ok(None) => Json(ApiResponse {
+            success: true,
+            message: "No active workout session".to_string(),
+            data: None,
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to fetch active workout session: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn end_workout_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(session_id): Path<i64>,
+) -> Json<ApiResponse<WorkoutSession>> {
+    if get_owned_workout_session(&state.db, user_id, session_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Session not found".to_string(),
+            data: None,
+        });
+    }
+
+    let now = Utc::now().to_rfc3339();
+
+    let result = sqlx::query(
+        r#"
+        UPDATE workout_sessions
+        SET ended_at = ?, status = 'completed'
+        WHERE id = ? AND status = 'active'
+        "#,
+    )
+    .bind(&now)
+    .bind(session_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                return Json(ApiResponse {
+                    success: false,
+                    message: "No active session found to end".to_string(),
+                    data: None,
+                });
+            }
+
+            let session = sqlx::query_as::<_, WorkoutSession>(
+                r#"
+                SELECT id, profile_id, started_at, ended_at, status
+                FROM workout_sessions
+                WHERE id = ?
+                "#,
+            )
+            .bind(session_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+
+            Json(ApiResponse {
+                success: true,
+                message: "Workout session ended".to_string(),
+                data: Some(session),
+            })
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to end workout session: {}", e),
+            data: None,
+        }),
+    }
+}
+
 async fn create_workout_log(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
     Json(payload): Json<CreateWorkoutLog>,
 ) -> Json<ApiResponse<WorkoutLogResponse>> {
     let now = Utc::now().to_rfc3339();
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    if get_owned_exercise(&state.db, user_id, payload.exercise_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise not found".to_string(),
+            data: None,
+        });
+    }
+
+    if get_owned_workout_session(&state.db, user_id, payload.session_id)
+        .await
+        .is_err()
+    {
+        return Json(ApiResponse {
+            success: false,
+            message: "Workout session not found".to_string(),
+            data: None,
+        });
+    }
 
     let active_session = sqlx::query_as::<_, WorkoutSession>(
         r#"
@@ -556,7 +1180,7 @@ async fn create_workout_log(
         "#,
     )
     .bind(payload.session_id)
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .fetch_optional(&state.db)
     .await;
 
@@ -585,7 +1209,7 @@ async fn create_workout_log(
         WHERE profile_id = ? AND exercise_id = ?
         "#,
     )
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .bind(payload.exercise_id)
     .fetch_one(&state.db)
     .await
@@ -599,7 +1223,7 @@ async fn create_workout_log(
         LIMIT 1
         "#,
     )
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .bind(payload.exercise_id)
     .bind(payload.session_id)
     .fetch_optional(&state.db)
@@ -649,7 +1273,7 @@ async fn create_workout_log(
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
-            .bind(payload.profile_id)
+            .bind(profile.id)
             .bind(payload.exercise_id)
             .bind(payload.session_id)
             .bind(payload.weight)
@@ -687,7 +1311,9 @@ async fn create_workout_log(
     let volume_xp = (added_volume / 10.0).floor() as i64;
     let rep_xp = payload.reps;
     let base_xp = 10_i64;
-    let new_pr = previous_max_weight.map(|w| payload.weight > w).unwrap_or(true);
+    let new_pr = previous_max_weight
+        .map(|w| payload.weight > w)
+        .unwrap_or(true);
     let pr_xp = if new_pr { 25 } else { 0 };
     let gained_xp = base_xp + volume_xp + rep_xp + pr_xp;
 
@@ -699,7 +1325,7 @@ async fn create_workout_log(
         "#,
     )
     .bind(gained_xp)
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .execute(&state.db)
     .await
     .unwrap();
@@ -711,12 +1337,12 @@ async fn create_workout_log(
         WHERE id = ?
         "#,
     )
-    .bind(payload.profile_id)
+    .bind(profile.id)
     .fetch_one(&state.db)
     .await
     .unwrap_or(0);
 
-    let unlocked_badges = evaluate_and_unlock_badges(&state.db, payload.profile_id)
+    let unlocked_badges = evaluate_and_unlock_badges(&state.db, profile.id)
         .await
         .unwrap_or_default();
 
@@ -731,6 +1357,38 @@ async fn create_workout_log(
             unlocked_badges,
         }),
     })
+}
+
+async fn get_my_exercise_history(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(exercise_id): Path<i64>,
+) -> Json<ApiResponse<Vec<ExerciseHistoryItem>>> {
+    if get_owned_exercise(&state.db, user_id, exercise_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise not found".to_string(),
+            data: None,
+        });
+    }
+
+    get_exercise_history(State(state), Path(exercise_id)).await
+}
+
+async fn get_my_exercise_graph(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(exercise_id): Path<i64>,
+) -> Json<ApiResponse<Vec<ExerciseGraphPoint>>> {
+    if get_owned_exercise(&state.db, user_id, exercise_id).await.is_err() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise not found".to_string(),
+            data: None,
+        });
+    }
+
+    get_exercise_graph(State(state), Path(exercise_id)).await
 }
 
 async fn get_exercise_history(
@@ -824,6 +1482,129 @@ async fn get_exercise_graph(
         Err(e) => Json(ApiResponse {
             success: false,
             message: format!("Failed to fetch graph data: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn update_workout_log(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(workout_id): Path<i64>,
+    Json(payload): Json<UpdateWorkoutLog>,
+) -> Json<ApiResponse<WorkoutLog>> {
+    let existing = sqlx::query_as::<_, WorkoutLog>(
+        r#"
+        SELECT wl.id, wl.profile_id, wl.exercise_id, wl.session_id, wl.weight, wl.reps, wl.total_volume, wl.performed_at
+        FROM workout_logs wl
+        JOIN profiles p ON wl.profile_id = p.id
+        WHERE wl.id = ? AND p.user_id = ?
+        "#,
+    )
+    .bind(workout_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await;
+
+    match existing {
+        Ok(existing_row) => {
+            let recalculated_total_volume = payload.weight * payload.reps as f64;
+
+            let result = sqlx::query(
+                r#"
+                UPDATE workout_logs
+                SET weight = ?, reps = ?, total_volume = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(payload.weight)
+            .bind(payload.reps)
+            .bind(recalculated_total_volume)
+            .bind(workout_id)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    let workout = sqlx::query_as::<_, WorkoutLog>(
+                        r#"
+                        SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
+                        FROM workout_logs
+                        WHERE id = ?
+                        "#,
+                    )
+                    .bind(existing_row.id)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+
+                    Json(ApiResponse {
+                        success: true,
+                        message: "Workout updated".to_string(),
+                        data: Some(workout),
+                    })
+                }
+                Err(e) => Json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to update workout: {}", e),
+                    data: None,
+                }),
+            }
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Workout not found: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn delete_workout_log(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Path(workout_id): Path<i64>,
+) -> Json<ApiResponse<String>> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT wl.id
+        FROM workout_logs wl
+        JOIN profiles p ON wl.profile_id = p.id
+        WHERE wl.id = ? AND p.user_id = ?
+        "#,
+    )
+    .bind(workout_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+
+    if exists.is_none() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Workout not found".to_string(),
+            data: None,
+        });
+    }
+
+    let result = sqlx::query(
+        r#"
+        DELETE FROM workout_logs
+        WHERE id = ?
+        "#,
+    )
+    .bind(workout_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(_) => Json(ApiResponse {
+            success: true,
+            message: "Workout deleted".to_string(),
+            data: Some("Deleted".to_string()),
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to delete workout: {}", e),
             data: None,
         }),
     }
@@ -945,6 +1726,200 @@ async fn get_dashboard(
     }
 }
 
+async fn get_profile_exercises(
+    State(state): State<AppState>,
+    Path(profile_id): Path<i64>,
+) -> Json<ApiResponse<Vec<Exercise>>> {
+    let result = sqlx::query_as::<_, Exercise>(
+        r#"
+        SELECT id, profile_id, name, muscle_group, created_at
+        FROM exercises
+        WHERE profile_id = ?
+        ORDER BY name ASC
+        "#,
+    )
+    .bind(profile_id)
+    .fetch_all(&state.db)
+    .await;
+
+    match result {
+        Ok(exercises) => Json(ApiResponse {
+            success: true,
+            message: "Exercises fetched".to_string(),
+            data: Some(exercises),
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to fetch exercises: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn get_today_coverage(
+    State(state): State<AppState>,
+    Path(profile_id): Path<i64>,
+) -> Json<ApiResponse<MuscleCoverageResponse>> {
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+
+    let covered: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT e.muscle_group
+        FROM workout_logs w
+        JOIN exercises e ON w.exercise_id = e.id
+        WHERE w.profile_id = ? AND substr(w.performed_at, 1, 10) = ?
+        ORDER BY e.muscle_group ASC
+        "#,
+    )
+    .bind(profile_id)
+    .bind(today)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let all_groups = standard_muscle_groups();
+    let missing = all_groups
+        .into_iter()
+        .filter(|g| !covered.contains(g))
+        .collect::<Vec<_>>();
+
+    Json(ApiResponse {
+        success: true,
+        message: "Today's coverage fetched".to_string(),
+        data: Some(MuscleCoverageResponse { covered, missing }),
+    })
+}
+
+async fn get_week_coverage(
+    State(state): State<AppState>,
+    Path(profile_id): Path<i64>,
+) -> Json<ApiResponse<MuscleCoverageResponse>> {
+    let today = Utc::now().date_naive();
+    let start = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
+    let end = today.format("%Y-%m-%d").to_string();
+
+    let covered: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT e.muscle_group
+        FROM workout_logs w
+        JOIN exercises e ON w.exercise_id = e.id
+        WHERE w.profile_id = ?
+          AND substr(w.performed_at, 1, 10) >= ?
+          AND substr(w.performed_at, 1, 10) <= ?
+        ORDER BY e.muscle_group ASC
+        "#,
+    )
+    .bind(profile_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let all_groups = standard_muscle_groups();
+    let missing = all_groups
+        .into_iter()
+        .filter(|g| !covered.contains(g))
+        .collect::<Vec<_>>();
+
+    Json(ApiResponse {
+        success: true,
+        message: "Weekly coverage fetched".to_string(),
+        data: Some(MuscleCoverageResponse { covered, missing }),
+    })
+}
+
+async fn get_missions(
+    State(state): State<AppState>,
+    Path(profile_id): Path<i64>,
+) -> Json<ApiResponse<MissionSummary>> {
+    let summary = build_level_summary(&state.db, profile_id).await.unwrap();
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+
+    let today_logs: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM workout_logs
+        WHERE profile_id = ? AND substr(performed_at, 1, 10) = ?
+        "#,
+    )
+    .bind(profile_id)
+    .bind(today)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    let week_covered: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT e.muscle_group
+        FROM workout_logs w
+        JOIN exercises e ON w.exercise_id = e.id
+        WHERE w.profile_id = ?
+          AND substr(w.performed_at, 1, 10) >= date('now', '-6 day')
+        "#,
+    )
+    .bind(profile_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let missions = vec![
+        Mission {
+            name: "Daily Grind".to_string(),
+            description: "Log at least 1 workout today".to_string(),
+            completed: today_logs >= 1,
+        },
+        Mission {
+            name: "Triple Threat".to_string(),
+            description: "Reach a 3-day streak".to_string(),
+            completed: summary.current_streak >= 3,
+        },
+        Mission {
+            name: "Balanced Week".to_string(),
+            description: "Train at least 4 muscle groups this week".to_string(),
+            completed: week_covered.len() >= 4,
+        },
+    ];
+
+    Json(ApiResponse {
+        success: true,
+        message: "Missions fetched".to_string(),
+        data: Some(MissionSummary {
+            profile_id,
+            current_streak: summary.current_streak,
+            weekly_missions: missions,
+        }),
+    })
+}
+
+async fn search_catalog_exercises(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<ExerciseCatalogItem>>> {
+    let result = sqlx::query_as::<_, ExerciseCatalogItem>(
+        r#"
+        SELECT id, name, muscle_group
+        FROM exercise_catalog
+        ORDER BY name ASC
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    match result {
+        Ok(items) => Json(ApiResponse {
+            success: true,
+            message: "Catalog fetched".to_string(),
+            data: Some(items),
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            message: format!("Failed to fetch catalog: {}", e),
+            data: None,
+        }),
+    }
+}
+
 async fn build_level_summary(
     db: &SqlitePool,
     profile_id: i64,
@@ -1046,12 +2021,10 @@ async fn fetch_distinct_workout_dates(
     .fetch_all(db)
     .await?;
 
-    let dates = rows
+    Ok(rows
         .into_iter()
         .filter_map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok())
-        .collect();
-
-    Ok(dates)
+        .collect())
 }
 
 fn calculate_current_streak(dates: &[NaiveDate]) -> i64 {
@@ -1110,7 +2083,6 @@ async fn evaluate_and_unlock_badges(
     profile_id: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut unlocked = Vec::new();
-
     let summary = build_level_summary(db, profile_id).await?;
 
     let total_logs: i64 = sqlx::query_scalar(
@@ -1180,7 +2152,6 @@ async fn evaluate_and_unlock_badges(
     for (condition, name, description) in candidates {
         if condition {
             let now = Utc::now().to_rfc3339();
-
             let res = sqlx::query(
                 r#"
                 INSERT OR IGNORE INTO badges (profile_id, name, description, unlocked_at)
@@ -1216,382 +2187,6 @@ fn level_from_score(score: i64) -> String {
     }
 }
 
-async fn get_profile_exercises(
-    State(state): State<AppState>,
-    Path(profile_id): Path<i64>,
-) -> Json<ApiResponse<Vec<Exercise>>> {
-    let result = sqlx::query_as::<_, Exercise>(
-        r#"
-        SELECT id, profile_id, name, muscle_group, created_at
-        FROM exercises
-        WHERE profile_id = ?
-        ORDER BY name ASC
-        "#,
-    )
-    .bind(profile_id)
-    .fetch_all(&state.db)
-    .await;
-
-    match result {
-        Ok(exercises) => Json(ApiResponse {
-            success: true,
-            message: "Exercises fetched".to_string(),
-            data: Some(exercises),
-        }),
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to fetch exercises: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn search_catalog_exercises(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<ExerciseCatalogItem>>> {
-    let result = sqlx::query_as::<_, ExerciseCatalogItem>(
-        r#"
-        SELECT id, name, muscle_group
-        FROM exercise_catalog
-        ORDER BY name ASC
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await;
-
-    match result {
-        Ok(items) => Json(ApiResponse {
-            success: true,
-            message: "Catalog fetched".to_string(),
-            data: Some(items),
-        }),
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to fetch catalog: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn update_exercise(
-    State(state): State<AppState>,
-    Path(exercise_id): Path<i64>,
-    Json(payload): Json<UpdateExercise>,
-) -> Json<ApiResponse<Exercise>> {
-    let result = sqlx::query(
-        r#"
-        UPDATE exercises
-        SET name = ?, muscle_group = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(&payload.name)
-    .bind(&payload.muscle_group)
-    .bind(exercise_id)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(_) => {
-            let exercise = sqlx::query_as::<_, Exercise>(
-                r#"
-                SELECT id, profile_id, name, muscle_group, created_at
-                FROM exercises
-                WHERE id = ?
-                "#,
-            )
-            .bind(exercise_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-
-            Json(ApiResponse {
-                success: true,
-                message: "Exercise updated".to_string(),
-                data: Some(exercise),
-            })
-        }
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to update exercise: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn delete_exercise(
-    State(state): State<AppState>,
-    Path(exercise_id): Path<i64>,
-) -> Json<ApiResponse<String>> {
-    let _ = sqlx::query(
-        r#"
-        DELETE FROM workout_logs
-        WHERE exercise_id = ?
-        "#,
-    )
-    .bind(exercise_id)
-    .execute(&state.db)
-    .await;
-
-    let result = sqlx::query(
-        r#"
-        DELETE FROM exercises
-        WHERE id = ?
-        "#,
-    )
-    .bind(exercise_id)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(_) => Json(ApiResponse {
-            success: true,
-            message: "Exercise deleted".to_string(),
-            data: Some("Deleted".to_string()),
-        }),
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to delete exercise: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn update_workout_log(
-    State(state): State<AppState>,
-    Path(workout_id): Path<i64>,
-    Json(payload): Json<UpdateWorkoutLog>,
-) -> Json<ApiResponse<WorkoutLog>> {
-    let existing = sqlx::query_as::<_, WorkoutLog>(
-        r#"
-        SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
-        FROM workout_logs
-        WHERE id = ?
-        "#,
-    )
-    .bind(workout_id)
-    .fetch_one(&state.db)
-    .await;
-
-    match existing {
-        Ok(existing_row) => {
-            let recalculated_total_volume = payload.weight * payload.reps as f64;
-
-            let result = sqlx::query(
-                r#"
-                UPDATE workout_logs
-                SET weight = ?, reps = ?, total_volume = ?
-                WHERE id = ?
-                "#,
-            )
-            .bind(payload.weight)
-            .bind(payload.reps)
-            .bind(recalculated_total_volume)
-            .bind(workout_id)
-            .execute(&state.db)
-            .await;
-
-            match result {
-                Ok(_) => {
-                    let workout = sqlx::query_as::<_, WorkoutLog>(
-                        r#"
-                        SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
-                        FROM workout_logs
-                        WHERE id = ?
-                        "#,
-                    )
-                    .bind(existing_row.id)
-                    .fetch_one(&state.db)
-                    .await
-                    .unwrap();
-
-                    Json(ApiResponse {
-                        success: true,
-                        message: "Workout updated".to_string(),
-                        data: Some(workout),
-                    })
-                }
-                Err(e) => Json(ApiResponse {
-                    success: false,
-                    message: format!("Failed to update workout: {}", e),
-                    data: None,
-                }),
-            }
-        }
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Workout not found: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn delete_workout_log(
-    State(state): State<AppState>,
-    Path(workout_id): Path<i64>,
-) -> Json<ApiResponse<String>> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM workout_logs
-        WHERE id = ?
-        "#,
-    )
-    .bind(workout_id)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(_) => Json(ApiResponse {
-            success: true,
-            message: "Workout deleted".to_string(),
-            data: Some("Deleted".to_string()),
-        }),
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to delete workout: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn get_today_coverage(
-    State(state): State<AppState>,
-    Path(profile_id): Path<i64>,
-) -> Json<ApiResponse<MuscleCoverageResponse>> {
-    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-
-    let covered: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT e.muscle_group
-        FROM workout_logs w
-        JOIN exercises e ON w.exercise_id = e.id
-        WHERE w.profile_id = ? AND substr(w.performed_at, 1, 10) = ?
-        ORDER BY e.muscle_group ASC
-        "#,
-    )
-    .bind(profile_id)
-    .bind(today)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let all_groups = standard_muscle_groups();
-    let missing = all_groups
-        .into_iter()
-        .filter(|g| !covered.contains(g))
-        .collect::<Vec<_>>();
-
-    Json(ApiResponse {
-        success: true,
-        message: "Today's coverage fetched".to_string(),
-        data: Some(MuscleCoverageResponse { covered, missing }),
-    })
-}
-
-async fn get_week_coverage(
-    State(state): State<AppState>,
-    Path(profile_id): Path<i64>,
-) -> Json<ApiResponse<MuscleCoverageResponse>> {
-    let today = Utc::now().date_naive();
-    let start = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
-    let end = today.format("%Y-%m-%d").to_string();
-
-    let covered: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT e.muscle_group
-        FROM workout_logs w
-        JOIN exercises e ON w.exercise_id = e.id
-        WHERE w.profile_id = ?
-          AND substr(w.performed_at, 1, 10) >= ?
-          AND substr(w.performed_at, 1, 10) <= ?
-        ORDER BY e.muscle_group ASC
-        "#,
-    )
-    .bind(profile_id)
-    .bind(start)
-    .bind(end)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let all_groups = standard_muscle_groups();
-    let missing = all_groups
-        .into_iter()
-        .filter(|g| !covered.contains(g))
-        .collect::<Vec<_>>();
-
-    Json(ApiResponse {
-        success: true,
-        message: "Weekly coverage fetched".to_string(),
-        data: Some(MuscleCoverageResponse { covered, missing }),
-    })
-}
-
-async fn get_missions(
-    State(state): State<AppState>,
-    Path(profile_id): Path<i64>,
-) -> Json<ApiResponse<MissionSummary>> {
-    let summary = build_level_summary(&state.db, profile_id).await.unwrap();
-
-    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-
-    let today_logs: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM workout_logs
-        WHERE profile_id = ? AND substr(performed_at, 1, 10) = ?
-        "#,
-    )
-    .bind(profile_id)
-    .bind(today)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(Some(0))
-    .unwrap_or(0);
-
-    let week_covered: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT e.muscle_group
-        FROM workout_logs w
-        JOIN exercises e ON w.exercise_id = e.id
-        WHERE w.profile_id = ?
-          AND substr(w.performed_at, 1, 10) >= date('now', '-6 day')
-        "#,
-    )
-    .bind(profile_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let missions = vec![
-        Mission {
-            name: "Daily Grind".to_string(),
-            description: "Log at least 1 workout today".to_string(),
-            completed: today_logs >= 1,
-        },
-        Mission {
-            name: "Triple Threat".to_string(),
-            description: "Reach a 3-day streak".to_string(),
-            completed: summary.current_streak >= 3,
-        },
-        Mission {
-            name: "Balanced Week".to_string(),
-            description: "Train at least 4 muscle groups this week".to_string(),
-            completed: week_covered.len() >= 4,
-        },
-    ];
-
-    Json(ApiResponse {
-        success: true,
-        message: "Missions fetched".to_string(),
-        data: Some(MissionSummary {
-            profile_id,
-            current_streak: summary.current_streak,
-            weekly_missions: missions,
-        }),
-    })
-}
-
 fn standard_muscle_groups() -> Vec<String> {
     vec![
         "Chest".to_string(),
@@ -1605,197 +2200,4 @@ fn standard_muscle_groups() -> Vec<String> {
         "Calves".to_string(),
         "Glutes".to_string(),
     ]
-}
-
-async fn start_workout_session(
-    State(state): State<AppState>,
-    Json(payload): Json<StartWorkoutSessionRequest>,
-) -> Json<ApiResponse<WorkoutSession>> {
-    let existing = sqlx::query_as::<_, WorkoutSession>(
-        r#"
-        SELECT id, profile_id, started_at, ended_at, status
-        FROM workout_sessions
-        WHERE profile_id = ? AND status = 'active'
-        ORDER BY started_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(payload.profile_id)
-    .fetch_optional(&state.db)
-    .await;
-
-    match existing {
-        Ok(Some(session)) => {
-            return Json(ApiResponse {
-                success: true,
-                message: "Active workout session already exists".to_string(),
-                data: Some(session),
-            });
-        }
-        Ok(None) => {}
-        Err(e) => {
-            return Json(ApiResponse {
-                success: false,
-                message: format!("Failed to check active session: {}", e),
-                data: None,
-            });
-        }
-    }
-
-    let now = Utc::now().to_rfc3339();
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO workout_sessions (profile_id, started_at, ended_at, status)
-        VALUES (?, ?, NULL, 'active')
-        "#,
-    )
-    .bind(payload.profile_id)
-    .bind(&now)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(res) => {
-            let id = res.last_insert_rowid();
-            let session = sqlx::query_as::<_, WorkoutSession>(
-                r#"
-                SELECT id, profile_id, started_at, ended_at, status
-                FROM workout_sessions
-                WHERE id = ?
-                "#,
-            )
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-
-            Json(ApiResponse {
-                success: true,
-                message: "Workout session started".to_string(),
-                data: Some(session),
-            })
-        }
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to start workout session: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn get_active_workout_session(
-    State(state): State<AppState>,
-    Path(profile_id): Path<i64>,
-) -> Json<ApiResponse<ActiveWorkoutResponse>> {
-    let session_result = sqlx::query_as::<_, WorkoutSession>(
-        r#"
-        SELECT id, profile_id, started_at, ended_at, status
-        FROM workout_sessions
-        WHERE profile_id = ? AND status = 'active'
-        ORDER BY started_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(profile_id)
-    .fetch_optional(&state.db)
-    .await;
-
-    match session_result {
-        Ok(Some(session)) => {
-            let entries = sqlx::query_as::<_, WorkoutLogWithExercise>(
-                r#"
-                SELECT
-                    w.id,
-                    w.profile_id,
-                    w.exercise_id,
-                    w.session_id,
-                    e.name as exercise_name,
-                    e.muscle_group as muscle_group,
-                    w.weight,
-                    w.reps,
-                    w.total_volume,
-                    w.performed_at
-                FROM workout_logs w
-                JOIN exercises e ON w.exercise_id = e.id
-                WHERE w.session_id = ?
-                ORDER BY w.performed_at ASC
-                "#,
-            )
-            .bind(session.id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
-
-            Json(ApiResponse {
-                success: true,
-                message: "Active workout fetched".to_string(),
-                data: Some(ActiveWorkoutResponse { session, entries }),
-            })
-        }
-        Ok(None) => Json(ApiResponse {
-            success: true,
-            message: "No active workout session".to_string(),
-            data: None,
-        }),
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to fetch active workout session: {}", e),
-            data: None,
-        }),
-    }
-}
-
-async fn end_workout_session(
-    State(state): State<AppState>,
-    Path(session_id): Path<i64>,
-) -> Json<ApiResponse<WorkoutSession>> {
-    let now = Utc::now().to_rfc3339();
-
-    let result = sqlx::query(
-        r#"
-        UPDATE workout_sessions
-        SET ended_at = ?, status = 'completed'
-        WHERE id = ? AND status = 'active'
-        "#,
-    )
-    .bind(&now)
-    .bind(session_id)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(res) => {
-            if res.rows_affected() == 0 {
-                return Json(ApiResponse {
-                    success: false,
-                    message: "No active session found to end".to_string(),
-                    data: None,
-                });
-            }
-
-            let session = sqlx::query_as::<_, WorkoutSession>(
-                r#"
-                SELECT id, profile_id, started_at, ended_at, status
-                FROM workout_sessions
-                WHERE id = ?
-                "#,
-            )
-            .bind(session_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-
-            Json(ApiResponse {
-                success: true,
-                message: "Workout session ended".to_string(),
-                data: Some(session),
-            })
-        }
-        Err(e) => Json(ApiResponse {
-            success: false,
-            message: format!("Failed to end workout session: {}", e),
-            data: None,
-        }),
-    }
 }
