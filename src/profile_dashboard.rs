@@ -71,6 +71,7 @@ pub async fn get_dashboard(
 }
 
 
+#[allow(dead_code)]
 pub async fn get_profile_level(
     State(state): State<AppState>,
     Path(profile_id): Path<i64>,
@@ -89,6 +90,7 @@ pub async fn get_profile_level(
     }
 }
 
+#[allow(dead_code)]
 pub async fn get_badges(
     State(state): State<AppState>,
     Path(profile_id): Path<i64>,
