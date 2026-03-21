@@ -8,6 +8,8 @@ mod game;
 mod exercise_data;
 mod profile_dashboard;
 mod calculation;
+mod leaderboard;
+
 
 
 
@@ -21,6 +23,7 @@ use exercise_data::{*};
 use game::{*};
 use profile_dashboard::{*};
 use calculation::{*};
+use leaderboard::{*};
 use auth_middleware::require_auth;
 use axum::{
     extract::{Path, State},
@@ -68,6 +71,7 @@ async fn main() {
         .route("/workouts/log", post(create_workout_log))
         .route("/workouts/{id}", post(update_workout_log))
         .route("/workouts/{id}/delete", post(delete_workout_log))
+        .route("/leaderboard", get(get_leaderboard))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,
