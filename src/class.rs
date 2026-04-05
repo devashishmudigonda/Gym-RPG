@@ -90,6 +90,43 @@ pub struct WorkoutLog {
     pub performed_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CalendarDay {
+    pub date: String,
+    pub total_volume: f64,
+    pub session_count: i64,
+    pub muscle_groups: Vec<String>,
+    pub had_workout: bool,
+    pub total_xp_earned: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MonthSummary {
+    pub year: i32,
+    pub month: i32,
+    pub days: Vec<CalendarDay>,
+    pub total_workout_days: i64,
+    pub total_volume: f64,
+    pub best_day_volume: f64,
+    pub best_streak: i64,
+    pub current_streak: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct WorkoutNote {
+    pub id: i64,
+    pub profile_id: i64,
+    pub date: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertNoteRequest {
+    pub date: String,
+    pub note: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateWorkoutLog {
     pub profile_id: i64,

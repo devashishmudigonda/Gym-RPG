@@ -9,6 +9,7 @@ mod exercise_data;
 mod profile_dashboard;
 mod calculation;
 mod leaderboard;
+mod calendar;
 
 
 
@@ -24,6 +25,7 @@ use game::{*};
 use profile_dashboard::{*};
 use calculation::{*};
 use leaderboard::{*};
+use calendar::{*};
 use auth_middleware::require_auth;
 use axum::{
     extract::{Path, State},
@@ -71,6 +73,10 @@ async fn main() {
         .route("/workouts/log", post(create_workout_log))
         .route("/workouts/{id}", post(update_workout_log))
         .route("/workouts/{id}/delete", post(delete_workout_log))
+        .route("/me/calendar/{year}/{month}", get(get_me_calendar_month))
+        .route("/me/calendar/note/{date}", get(get_me_workout_note))
+        .route("/me/calendar/note", post(upsert_workout_note))
+        .route("/me/calendar/heatmap/{year}", get(get_me_year_heatmap))
         .route("/leaderboard", get(get_leaderboard))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -205,6 +211,22 @@ async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
             muscle_group TEXT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS workout_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            note TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(profile_id, date),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id)
         );
         "#,
     )
