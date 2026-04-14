@@ -598,3 +598,38 @@ pub async fn get_my_active_workout(
     get_active_workout_session(State(state), Path(profile.id)).await
 }
 
+pub async fn get_my_workout_days(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let profile = match get_current_profile_by_user_id(&state.db, user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                message: format!("Profile fetch failed: {}", e),
+                data: None,
+            })
+        }
+    };
+
+    let dates: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT substr(performed_at, 1, 10) as workout_date
+        FROM workout_logs
+        WHERE profile_id = ?
+        ORDER BY workout_date DESC
+        "#,
+    )
+    .bind(profile.id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(ApiResponse {
+        success: true,
+        message: "Workout days fetched".to_string(),
+        data: Some(dates),
+    })
+}
+

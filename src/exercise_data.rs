@@ -6,7 +6,7 @@ pub async fn search_catalog_exercises(
 ) -> Json<ApiResponse<Vec<ExerciseCatalogItem>>> {
     let result = sqlx::query_as::<_, ExerciseCatalogItem>(
         r#"
-        SELECT id, name, muscle_group
+        SELECT id, name, muscle_group, equipment, secondary_muscles
         FROM exercise_catalog
         ORDER BY name ASC
         "#,

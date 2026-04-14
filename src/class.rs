@@ -8,6 +8,7 @@ use sqlx::{FromRow, SqlitePool};
 #[derive(Clone)]
  pub struct AppState {
     pub db: SqlitePool,
+    pub jwt_secret: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +63,8 @@ pub struct Exercise {
     pub profile_id: i64,
     pub name: String,
     pub muscle_group: String,
+    pub equipment: String,
+    pub secondary_muscles: String,
     pub created_at: String,
 }
 
@@ -70,12 +73,20 @@ pub struct CreateExercise {
     pub profile_id: i64,
     pub name: String,
     pub muscle_group: String,
+    #[serde(default)]
+    pub equipment: String,
+    #[serde(default)]
+    pub secondary_muscles: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateExercise {
     pub name: String,
     pub muscle_group: String,
+    #[serde(default)]
+    pub equipment: String,
+    #[serde(default)]
+    pub secondary_muscles: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -173,6 +184,8 @@ pub struct ExerciseCatalogItem {
     pub id: i64,
     pub name: String,
     pub muscle_group: String,
+    pub equipment: String,
+    pub secondary_muscles: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -33,20 +33,32 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration, Utc};
-use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 
 
 #[tokio::main]
 async fn main() {
-    let db = SqlitePool::connect("sqlite://gym_app.db")
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://gym_app.db".to_string());
+
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| {
+            eprintln!("WARNING: JWT_SECRET not set, using insecure default. Set JWT_SECRET in production!");
+            "dev-only-change-this-in-production".to_string()
+        })
+        .into_bytes();
+
+    let db = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
         .await
         .expect("Failed to connect to SQLite");
 
     init_db(&db).await.expect("Failed to initialize DB");
 
-    let state = AppState { db };
+    let state = AppState { db, jwt_secret };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -61,6 +73,7 @@ async fn main() {
         .route("/me/coverage/week", get(get_me_week_coverage))
         .route("/me/missions", get(get_me_missions))
         .route("/me/workouts/active", get(get_my_active_workout))
+        .route("/me/workout-days", get(get_my_workout_days))
         .route("/me/exercises/{id}/history", get(get_my_exercise_history))
         .route("/me/exercises/{id}/graph", get(get_my_exercise_graph))
         .route("/exercises", post(create_exercise))
@@ -98,7 +111,13 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
+async fn init_db(db: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    // Enable WAL mode for better concurrent read/write performance and crash safety
+    sqlx::query("PRAGMA journal_mode=WAL;").execute(db).await?;
+    sqlx::query("PRAGMA synchronous=NORMAL;").execute(db).await?;
+    sqlx::query("PRAGMA busy_timeout=5000;").execute(db).await?;
+    sqlx::query("PRAGMA foreign_keys=ON;").execute(db).await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
@@ -140,6 +159,8 @@ async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
             profile_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             muscle_group TEXT NOT NULL,
+            equipment TEXT NOT NULL DEFAULT '',
+            secondary_muscles TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             FOREIGN KEY (profile_id) REFERENCES profiles(id)
         );
@@ -147,6 +168,12 @@ async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+
+    // Migrations for existing DBs
+    let _ = sqlx::query("ALTER TABLE exercises ADD COLUMN equipment TEXT NOT NULL DEFAULT ''")
+        .execute(db).await;
+    let _ = sqlx::query("ALTER TABLE exercises ADD COLUMN secondary_muscles TEXT NOT NULL DEFAULT ''")
+        .execute(db).await;
 
     sqlx::query(
         r#"
@@ -204,49 +231,62 @@ async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS exercise_catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            muscle_group TEXT NOT NULL
+            muscle_group TEXT NOT NULL,
+            equipment TEXT NOT NULL DEFAULT '',
+            secondary_muscles TEXT NOT NULL DEFAULT ''
         );
         "#,
     )
     .execute(db)
     .await?;
 
-    let default_exercises = vec![
-        ("Bench Press", "Chest"),
-        ("Incline Bench Press", "Chest"),
-        ("Push Up", "Chest"),
-        ("Chest Fly", "Chest"),
-        ("Squat", "Legs"),
-        ("Leg Press", "Legs"),
-        ("Lunge", "Legs"),
-        ("Romanian Deadlift", "Hamstrings"),
-        ("Deadlift", "Back"),
-        ("Pull Up", "Back"),
-        ("Lat Pulldown", "Back"),
-        ("Barbell Row", "Back"),
-        ("Shoulder Press", "Shoulders"),
-        ("Lateral Raise", "Shoulders"),
-        ("Rear Delt Fly", "Shoulders"),
-        ("Barbell Curl", "Biceps"),
-        ("Hammer Curl", "Biceps"),
-        ("Tricep Pushdown", "Triceps"),
-        ("Skull Crusher", "Triceps"),
-        ("Plank", "Core"),
-        ("Crunch", "Core"),
-        ("Leg Raise", "Core"),
-        ("Calf Raise", "Calves"),
-        ("Hip Thrust", "Glutes"),
+    let _ = sqlx::query("ALTER TABLE exercise_catalog ADD COLUMN equipment TEXT NOT NULL DEFAULT ''")
+        .execute(db).await;
+    let _ = sqlx::query("ALTER TABLE exercise_catalog ADD COLUMN secondary_muscles TEXT NOT NULL DEFAULT ''")
+        .execute(db).await;
+
+    // name, muscle_group, equipment, secondary_muscles
+    let default_exercises: Vec<(&str, &str, &str, &str)> = vec![
+        ("Bench Press",          "Chest",      "Barbell",    "Triceps, Shoulders"),
+        ("Incline Bench Press",  "Chest",      "Barbell",    "Triceps, Shoulders"),
+        ("Push Up",              "Chest",      "Bodyweight", "Triceps, Core"),
+        ("Chest Fly",            "Chest",      "Dumbbell",   "Shoulders"),
+        ("Squat",                "Legs",       "Barbell",    "Glutes, Core"),
+        ("Leg Press",            "Legs",       "Machine",    "Glutes"),
+        ("Lunge",                "Legs",       "Dumbbell",   "Glutes, Core"),
+        ("Romanian Deadlift",    "Hamstrings", "Barbell",    "Glutes, Back"),
+        ("Deadlift",             "Back",       "Barbell",    "Legs, Glutes, Core"),
+        ("Pull Up",              "Back",       "Bodyweight", "Biceps"),
+        ("Lat Pulldown",         "Back",       "Cable",      "Biceps"),
+        ("Barbell Row",          "Back",       "Barbell",    "Biceps, Core"),
+        ("Shoulder Press",       "Shoulders",  "Barbell",    "Triceps"),
+        ("Lateral Raise",        "Shoulders",  "Dumbbell",   ""),
+        ("Rear Delt Fly",        "Shoulders",  "Dumbbell",   "Back"),
+        ("Barbell Curl",         "Biceps",     "Barbell",    "Forearms"),
+        ("Hammer Curl",          "Biceps",     "Dumbbell",   "Forearms"),
+        ("Tricep Pushdown",      "Triceps",    "Cable",      ""),
+        ("Skull Crusher",        "Triceps",    "EZ Bar",     ""),
+        ("Plank",                "Core",       "Bodyweight", "Shoulders, Back"),
+        ("Crunch",               "Core",       "Bodyweight", ""),
+        ("Leg Raise",            "Core",       "Bodyweight", ""),
+        ("Calf Raise",           "Calves",     "Machine",    ""),
+        ("Hip Thrust",           "Glutes",     "Barbell",    "Hamstrings"),
     ];
 
-    for (name, muscle_group) in default_exercises {
+    for (name, muscle_group, equipment, secondary) in &default_exercises {
         let _ = sqlx::query(
             r#"
-            INSERT OR IGNORE INTO exercise_catalog (name, muscle_group)
-            VALUES (?, ?)
+            INSERT INTO exercise_catalog (name, muscle_group, equipment, secondary_muscles)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                equipment = excluded.equipment,
+                secondary_muscles = excluded.secondary_muscles
             "#,
         )
         .bind(name)
         .bind(muscle_group)
+        .bind(equipment)
+        .bind(secondary)
         .execute(db)
         .await;
     }

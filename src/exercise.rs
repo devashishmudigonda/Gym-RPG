@@ -13,7 +13,12 @@ pub async fn get_current_profile_by_user_id(db: &sqlx::SqlitePool, user_id: i64)
 
 pub async fn get_owned_exercise(db: &sqlx::SqlitePool, user_id: i64, exercise_id: i64) -> Result<Exercise, sqlx::Error> {
     sqlx::query_as::<_, Exercise>(
-        "SELECT e.id, e.profile_id, e.name, e.muscle_group, e.created_at FROM exercises e JOIN profiles p ON e.profile_id = p.id WHERE e.id = ? AND p.user_id = ?"
+        r#"
+        SELECT e.id, e.profile_id, e.name, e.muscle_group, e.equipment, e.secondary_muscles, e.created_at
+        FROM exercises e
+        JOIN profiles p ON e.profile_id = p.id
+        WHERE e.id = ? AND p.user_id = ?
+        "#,
     )
     .bind(exercise_id)
     .bind(user_id)
@@ -27,7 +32,7 @@ pub async fn get_profile_exercises(
 ) -> Json<ApiResponse<Vec<Exercise>>> {
     let result = sqlx::query_as::<_, Exercise>(
         r#"
-        SELECT id, profile_id, name, muscle_group, created_at
+        SELECT id, profile_id, name, muscle_group, equipment, secondary_muscles, created_at
         FROM exercises
         WHERE profile_id = ?
         ORDER BY name ASC
@@ -77,7 +82,6 @@ pub async fn get_exercise_history(
                 if log.weight > running_max {
                     running_max = log.weight;
                 }
-
                 history.push(ExerciseHistoryItem {
                     id: log.id,
                     date: log.performed_at,
@@ -164,15 +168,34 @@ pub async fn create_exercise(
         }
     };
 
+    // Validate
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Exercise name is required".to_string(),
+            data: None,
+        });
+    }
+    if payload.muscle_group.trim().is_empty() {
+        return Json(ApiResponse {
+            success: false,
+            message: "Primary muscle group is required".to_string(),
+            data: None,
+        });
+    }
+
     let result = sqlx::query(
         r#"
-        INSERT INTO exercises (profile_id, name, muscle_group, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO exercises (profile_id, name, muscle_group, equipment, secondary_muscles, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(profile.id)
-    .bind(&payload.name)
-    .bind(&payload.muscle_group)
+    .bind(&name)
+    .bind(payload.muscle_group.trim())
+    .bind(payload.equipment.trim())
+    .bind(payload.secondary_muscles.trim())
     .bind(&now)
     .execute(&state.db)
     .await;
@@ -180,9 +203,9 @@ pub async fn create_exercise(
     match result {
         Ok(res) => {
             let id = res.last_insert_rowid();
-            let exercise = sqlx::query_as::<_, Exercise>(
+            let exercise = match sqlx::query_as::<_, Exercise>(
                 r#"
-                SELECT id, profile_id, name, muscle_group, created_at
+                SELECT id, profile_id, name, muscle_group, equipment, secondary_muscles, created_at
                 FROM exercises
                 WHERE id = ?
                 "#,
@@ -190,7 +213,16 @@ pub async fn create_exercise(
             .bind(id)
             .fetch_one(&state.db)
             .await
-            .unwrap();
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    return Json(ApiResponse {
+                        success: false,
+                        message: format!("Exercise created but failed to fetch: {}", e),
+                        data: None,
+                    })
+                }
+            };
 
             Json(ApiResponse {
                 success: true,
@@ -223,21 +255,23 @@ pub async fn update_exercise(
     let result = sqlx::query(
         r#"
         UPDATE exercises
-        SET name = ?, muscle_group = ?
+        SET name = ?, muscle_group = ?, equipment = ?, secondary_muscles = ?
         WHERE id = ?
         "#,
     )
-    .bind(&payload.name)
-    .bind(&payload.muscle_group)
+    .bind(payload.name.trim())
+    .bind(payload.muscle_group.trim())
+    .bind(payload.equipment.trim())
+    .bind(payload.secondary_muscles.trim())
     .bind(exercise_id)
     .execute(&state.db)
     .await;
 
     match result {
         Ok(_) => {
-            let exercise = sqlx::query_as::<_, Exercise>(
+            let exercise = match sqlx::query_as::<_, Exercise>(
                 r#"
-                SELECT id, profile_id, name, muscle_group, created_at
+                SELECT id, profile_id, name, muscle_group, equipment, secondary_muscles, created_at
                 FROM exercises
                 WHERE id = ?
                 "#,
@@ -245,7 +279,16 @@ pub async fn update_exercise(
             .bind(exercise_id)
             .fetch_one(&state.db)
             .await
-            .unwrap();
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    return Json(ApiResponse {
+                        success: false,
+                        message: format!("Updated but failed to fetch: {}", e),
+                        data: None,
+                    })
+                }
+            };
 
             Json(ApiResponse {
                 success: true,
@@ -274,25 +317,15 @@ pub async fn delete_exercise(
         });
     }
 
-    let _ = sqlx::query(
-        r#"
-        DELETE FROM workout_logs
-        WHERE exercise_id = ?
-        "#,
-    )
-    .bind(exercise_id)
-    .execute(&state.db)
-    .await;
+    let _ = sqlx::query("DELETE FROM workout_logs WHERE exercise_id = ?")
+        .bind(exercise_id)
+        .execute(&state.db)
+        .await;
 
-    let result = sqlx::query(
-        r#"
-        DELETE FROM exercises
-        WHERE id = ?
-        "#,
-    )
-    .bind(exercise_id)
-    .execute(&state.db)
-    .await;
+    let result = sqlx::query("DELETE FROM exercises WHERE id = ?")
+        .bind(exercise_id)
+        .execute(&state.db)
+        .await;
 
     match result {
         Ok(_) => Json(ApiResponse {
@@ -307,4 +340,3 @@ pub async fn delete_exercise(
         }),
     }
 }
-

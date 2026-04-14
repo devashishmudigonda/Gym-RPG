@@ -8,7 +8,7 @@ use axum::{
 use crate::{auth::verify_jwt, AppState};
 
 pub async fn require_auth(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -22,7 +22,7 @@ pub async fn require_auth(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let claims = verify_jwt(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let claims = verify_jwt(token, &state.jwt_secret).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     req.extensions_mut().insert(claims.sub);
 
