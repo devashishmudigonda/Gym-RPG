@@ -258,78 +258,27 @@ pub async fn create_workout_log(
     .await
     .unwrap_or(None);
 
-    let existing_log = sqlx::query_as::<_, WorkoutLog>(
+    let total_volume = payload.weight * payload.reps as f64;
+    let insert_res = sqlx::query(
         r#"
-        SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
-        FROM workout_logs
-        WHERE profile_id = ? AND exercise_id = ? AND session_id = ?
-        LIMIT 1
+        INSERT INTO workout_logs (profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(profile.id)
     .bind(payload.exercise_id)
     .bind(payload.session_id)
-    .fetch_optional(&state.db)
+    .bind(payload.weight)
+    .bind(payload.reps)
+    .bind(total_volume)
+    .bind(&now)
+    .execute(&state.db)
     .await;
 
-    let workout = match existing_log {
-        Ok(Some(existing)) => {
-            let added_volume = payload.weight * payload.reps as f64;
-            let updated_weight = existing.weight.max(payload.weight);
-            let updated_reps = existing.reps + payload.reps;
-            let updated_total_volume = existing.total_volume + added_volume;
-
-            sqlx::query(
-                r#"
-                UPDATE workout_logs
-                SET weight = ?, reps = ?, total_volume = ?, performed_at = ?
-                WHERE id = ?
-                "#,
-            )
-            .bind(updated_weight)
-            .bind(updated_reps)
-            .bind(updated_total_volume)
-            .bind(&now)
-            .bind(existing.id)
-            .execute(&state.db)
-            .await
-            .unwrap();
-
-            sqlx::query_as::<_, WorkoutLog>(
-                r#"
-                SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
-                FROM workout_logs
-                WHERE id = ?
-                "#,
-            )
-            .bind(existing.id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap()
-        }
-        Ok(None) => {
-            let total_volume = payload.weight * payload.reps as f64;
-
-            let res = sqlx::query(
-                r#"
-                INSERT INTO workout_logs (profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(profile.id)
-            .bind(payload.exercise_id)
-            .bind(payload.session_id)
-            .bind(payload.weight)
-            .bind(payload.reps)
-            .bind(total_volume)
-            .bind(&now)
-            .execute(&state.db)
-            .await
-            .unwrap();
-
-            let id = res.last_insert_rowid();
-
-            sqlx::query_as::<_, WorkoutLog>(
+    let workout = match insert_res {
+        Ok(r) => {
+            let id = r.last_insert_rowid();
+            match sqlx::query_as::<_, WorkoutLog>(
                 r#"
                 SELECT id, profile_id, exercise_id, session_id, weight, reps, total_volume, performed_at
                 FROM workout_logs
@@ -339,15 +288,20 @@ pub async fn create_workout_log(
             .bind(id)
             .fetch_one(&state.db)
             .await
-            .unwrap()
+            {
+                Ok(w) => w,
+                Err(e) => return Json(ApiResponse {
+                    success: false,
+                    message: format!("Set logged but failed to fetch: {}", e),
+                    data: None,
+                }),
+            }
         }
-        Err(e) => {
-            return Json(ApiResponse {
-                success: false,
-                message: format!("Failed to check existing workout log: {}", e),
-                data: None,
-            });
-        }
+        Err(e) => return Json(ApiResponse {
+            success: false,
+            message: format!("Failed to log set: {}", e),
+            data: None,
+        }),
     };
 
     let added_volume = payload.weight * payload.reps as f64;
